@@ -88,3 +88,42 @@ class CoreTests(unittest.TestCase):
         self.assertIsNone(normalize(msg, {'123'}, {'999'}))
         msg.author.bot = True
         self.assertIsNone(normalize(msg, {'123'}, {'456'}))
+
+class StatusTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.repo = ProcessedMessages(str(Path(temp.name) / 'test.db'))
+        self.core = BotCore(self.repo, admins={'telegram:1'}, active_adapters=['telegram'])
+        self.sender = Mock()
+
+    def status_for(self, user, mid='m1', text='status'):
+        self.core.handle(IncomingMessage(mid, user, text), self.sender, channel='telegram')
+        return self.sender.send_text.call_args.args[1]
+
+    def test_admin_sees_status(self):
+        reply = self.status_for('1')
+        self.assertIn('telegram', reply)
+        self.assertIn('接続OK', reply)
+        self.assertEqual(self.repo.state('telegram:1:1'), 'menu')
+
+    def test_non_admin_cannot_see_status(self):
+        reply = self.status_for('2')
+        self.assertNotIn('[status]', reply)
+
+    def test_db_failure_reported_without_crash(self):
+        self.repo.check = Mock(side_effect=RuntimeError('secret-conn'))
+        reply = self.status_for('1')
+        self.assertIn('DB接続: 接続失敗', reply)
+        self.assertNotIn('secret-conn', reply)
+
+    def test_adapter_failure_reported_without_crash(self):
+        self.core.active_adapters = 5  # not iterable
+        reply = self.status_for('1')
+        self.assertIn('有効なAdapter: 取得失敗', reply)
+        self.assertIn('接続OK', reply)
+
+    def test_no_admins_by_default(self):
+        core = BotCore(self.repo)
+        core.handle(IncomingMessage('x', '1', 'status'), self.sender, channel='telegram')
+        self.assertNotIn('[status]', self.sender.send_text.call_args.args[1])
