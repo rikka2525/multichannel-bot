@@ -192,6 +192,28 @@ class StatusEdgeTests(unittest.TestCase):
         self.repo.check = Mock(return_value=False)
         self.assertIn('接続NG', self.send(self.core(), '1', 'status'))
 
+    def test_db_check_false_exact_line_no_ok_no_failed_state_kept(self):
+        self.repo.check = Mock(return_value=False)
+        r = self.send(self.core(), '1', 'status')
+        self.assertIn('DB接続: 接続NG', r)
+        self.assertNotIn('接続OK', r)
+        self.assertNotIn('接続失敗', r)
+        self.assertIn('有効なAdapter: telegram', r)
+        self.assertEqual(self.repo.state('telegram:1:1'), 'menu')
+
+    def test_db_check_false_build_status_no_error_log(self):
+        repo = Mock()
+        repo.check.return_value = False
+        with self.assertNoLogs(level='ERROR'):
+            r = build_status(repo, ['mock'])
+        self.assertEqual(r, '[status]\n有効なAdapter: mock\nDB接続: 接続NG')
+
+    def test_db_unavailable_flag_skips_check(self):
+        repo = Mock()
+        r = build_status(repo, ['mock'], db_unavailable=True)
+        repo.check.assert_not_called()
+        self.assertIn('DB接続: 接続失敗', r)
+
     def test_exception_message_not_in_reply_or_logs(self):
         self.repo.check = Mock(side_effect=RuntimeError('token=SECRET123 C:\\priv\\x.db'))
         with self.assertLogs(level='ERROR') as cm:
@@ -255,6 +277,26 @@ class AdminsParseTests(unittest.TestCase):
         # Defense in depth: even a hand-built "telegram:" entry must not match an empty sender.
         c = BotCore(Mock(), admins={'telegram:'})
         self.assertFalse(c.is_status_request(IncomingMessage('m', '', 'status'), 'telegram'))
+
+    def test_more_malformed_entries_rejected(self):
+        for value in ['telegram', ':', ' :1', 'Mock:local', 'discord:\t', 'a,,b:1', ',,telegram', 'telegram:1,,whatsapp:2']:
+            with self.assertRaises(ValueError, msg=value):
+                self.parse(value)
+
+    def test_wrong_separators_never_grant_intended_admins(self):
+        # Wrong delimiters are not split into separate admins; they must never yield 'telegram:1' or 'discord:2'.
+        for value in ['telegram:1;discord:2', 'telegram:1 discord:2', 'telegram:1，discord:2']:
+            try:
+                result = self.parse(value)
+            except ValueError:
+                continue
+            self.assertNotIn('telegram:1', result, repr(value))
+            self.assertNotIn('discord:2', result, repr(value))
+
+    def test_wrong_separator_entry_does_not_authorize_status(self):
+        c = BotCore(Mock(), admins=self.parse('telegram:1;discord:2'))
+        self.assertFalse(c.is_status_request(IncomingMessage('m', '1', 'status'), 'telegram'))
+        self.assertFalse(c.is_status_request(IncomingMessage('m', '2', 'status'), 'discord'))
 
     def test_valid_channels_accepted(self):
         self.assertEqual(self.parse('mock:local,telegram:1,discord:2'), {'mock:local', 'telegram:1', 'discord:2'})
