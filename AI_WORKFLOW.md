@@ -43,6 +43,13 @@
 | review | security結果を踏まえた独立レビュー、重要度別の指摘、判定 |
 | release | 最終差分と検証結果の照合、必要な文書、PR本文案、コミット候補、準備可否 |
 
+## GitHub Actionsの自動テスト
+
+- [Tests](.github/workflows/tests.yml)はPR作成・更新時と`main`へのpush時に実行する。
+- READMEの動作確認環境に合わせたPython 3.12で、`python -m pip install -r requirements.txt`の後に`python -m unittest discover -s tests`を実行する。
+- pipキャッシュは`requirements.txt`をキーの入力に使う。外部サービスの秘密情報は不要で、実接続の確認は含まない。
+- PRテンプレートのTests欄にはローカルの検証結果とCI結果（実行URL、未実行ならその理由）を記録し、マージ前に最新のCI成功を確認する。
+
 ## 差し戻し条件
 
 - Critical / Highが未解決なら完了不可。実装修正はimplementation、テスト追加・修正はtestへ戻す。
