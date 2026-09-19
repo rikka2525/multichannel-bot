@@ -43,6 +43,10 @@ class ProcessedMessages:
             db.execute("INSERT INTO conversations(sender_key, state) VALUES (?, ?) ON CONFLICT(sender_key) DO UPDATE SET state=excluded.state", (sender_key, result.next_state))
             db.execute("INSERT OR IGNORE INTO processed (key) VALUES (?)", (key,))
 
+    def check(self) -> bool:
+        with closing(sqlite3.connect(self.path)) as db:
+            return db.execute("SELECT 1").fetchone() == (1,)
+
     def mark(self, key: str):
         with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("INSERT OR IGNORE INTO processed (key) VALUES (?)", (key,))
