@@ -120,3 +120,5 @@ Mockでは`reset` → `2` → `9`（入力エラー）→ `5` → `使いやす�
 - [検証結果](docs/VALIDATION.md)
 - [Discord表示名の統一](docs/DISCORD_NAME.md)
 - [公開前の確認とGitHub候補](docs/PUBLISHING.md)
+
+Issue-driven workflow test
