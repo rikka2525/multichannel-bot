@@ -104,7 +104,21 @@ Issueの種類を判断してbranch prefixを決める。
 
 という作業ブランチを最新mainから作る。
 
-同名branchが存在する場合は勝手に上書きせず状況を確認する。
+ブランチ作成前に `git fetch origin` を実行し、
+`main` が `origin/main` と一致していることを確認する。
+一致しない場合は勝手にmerge/rebaseせず停止して報告する。
+
+作業ブランチは追跡先を付けずに作成する。
+
+`git switch --no-track -c <branch-name> main`
+
+作成後に以下を確認する。
+
+- 現在branchが意図した作業branchである
+- upstreamが未設定である
+- `main` / `origin/main` が変更されていない
+
+同名branchが存在する場合は勝手に上書き、削除、resetせず状況を確認する。
 
 ## 4. Run AI development flow
 
@@ -142,6 +156,27 @@ research結果に基づき、Issue達成に必要な最小限の変更のみ実�
 テストを通すためだけのハードコード、
 検証条件の弱体化、
 既存テストの不当な削除は禁止する。
+
+#### Python runtime policy
+
+ローカルテスト実行前に使用するPythonのバージョンを記録する。
+
+例:
+
+`python --version`
+
+ローカルPythonとCI基準Pythonは区別して報告する。
+
+- Local runtime: 実際にローカルで使用したPython
+- CI baseline: GitHub Actionsで使用するPython 3.12
+
+ローカルがPython 3.12以外でも、それだけを失敗とは扱わない。
+ただしローカル結果を「Python 3.12で検証済み」と表現してはならない。
+
+最終的なPRのCI基準はGitHub ActionsのPython 3.12とする。
+
+CI未実行または失敗の場合は、
+ローカルテスト成功だけで最終検証成功としてはならない。
 
 ### security
 
@@ -196,6 +231,16 @@ Definition of Doneを満たした場合のみcommitする。
 作業ブランチのみpushする。
 mainへpushしてはならない。
 
+push時は現在の作業branchを明示する。
+
+`git push -u origin HEAD:<branch-name>`
+
+push後に `git branch -vv` を確認し、
+作業branchが `origin/<branch-name>` を追跡していることを確認する。
+
+`origin/main` を追跡している場合は異常として扱い、
+PR作成前に停止して報告する。
+
 ## 6. Create Pull Request
 
 GitHub CLIで `main` 向けPRを作成する。
@@ -216,13 +261,42 @@ Issueを完全に解決する場合:
 プレースホルダーを残さない。
 未確認項目は「未確認」と理由を書く。
 
-PR作成後、CI状態を確認する。
-pendingならpendingと報告する。
-失敗している場合は成功したと報告しない。
+PR作成後、PR番号とURLを取得する。
+
+GitHub Actionsのチェックが存在する場合は、
+原則としてCIが完了するまで待つ。
+
+GitHub CLIでは以下のような方法を使用できる。
+
+`gh pr checks <pr-number> --watch`
+
+CI完了後、最終状態を取得する。
+
+- success: 成功したチェック名と結果をPR本文へ反映する
+- failure: 失敗したチェックを記録し、成功扱いせず停止する
+- cancelled / skipped: 理由を記録し、必要性を判断する
+- CI自体が存在しない: 「CIなし」と明記する
+
+CI完了後にPR本文を最終更新する。
+
+PR本文のTests / Release欄には、
+
+- Local runtime
+- ローカルテスト結果
+- CI baseline
+- CI結果
+- CI実行URL
+- 未実行項目と理由
+
+を実測結果として記録する。
+
+PR本文更新後にもう一度PR状態を確認する。
+
+CI失敗時に、自動でmerge、mainへの直接push、branch protectionの回避をしてはならない。
 
 ## 7. Stop before merge
 
-PR作成後に必ず停止する。
+PR作成、CI完了確認、PR本文の最終更新後に必ず停止する。
 
 絶対にmergeしない。
 
