@@ -45,7 +45,8 @@ class ProcessedMessages:
 
     def check(self) -> bool:
         with closing(sqlite3.connect(self.path)) as db:
-            return db.execute("SELECT 1").fetchone() == (1,)
+            row = db.execute("PRAGMA quick_check").fetchone()
+            return row == ("ok",)
 
     def mark(self, key: str):
         with closing(sqlite3.connect(self.path)) as db, db:
