@@ -12,6 +12,8 @@ from contextlib import closing
 from pathlib import Path
 
 FIELDS = ("rating", "comment", "updated_at")
+# SQLite sidecar files next to the DB; overwriting them could corrupt the DB on recovery.
+SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 # Leading characters that spreadsheet apps may treat as a formula (incl. full-width variants).
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n", "＝", "＋", "－", "＠")
 
@@ -53,6 +55,34 @@ def _same_file(a: Path, b: Path) -> bool:
         return False
 
 
+def _normalize_name(name: str) -> str:
+    """Normalize a file name as Windows would open it: drop ADS suffix, trailing dots/spaces, and case."""
+    if os.name != "nt":
+        return name
+    return name.split(":", 1)[0].rstrip(" .").casefold()
+
+
+def _is_db_sidecar(db_path, output_path) -> bool:
+    """Return True if output_path names one of the DB's SQLite sidecar files (journal, WAL, shared memory).
+
+    Compares the normalized file name and the parent directory (via samefile), so it also catches
+    Windows spellings that differ lexically but open the same file (extended-length prefix, 8.3 names,
+    trailing dots/spaces, case, ADS suffix). The sidecar need not exist yet. An existing sidecar is
+    also matched by samefile, which covers its own 8.3 short name.
+    """
+    # abspath keeps an unresolved symlink name, which SQLite may use as the sidecar base.
+    db_paths = {Path(db_path).resolve(), Path(os.path.abspath(db_path))}
+    outputs = {Path(output_path).resolve(), Path(os.path.abspath(output_path))}
+    if any(_same_file(Path(str(db) + suffix), output)
+           for db in db_paths for suffix in SIDECAR_SUFFIXES for output in outputs):
+        return True
+    sidecar_names = {_normalize_name(db.name + suffix) for db in db_paths for suffix in SIDECAR_SUFFIXES}
+    # Check each normalized candidate (not the raw name), so "<sidecar>.\x\.." style paths are caught.
+    return any(_normalize_name(output.name) in sidecar_names
+               and any(_same_file(db.parent, output.parent) for db in db_paths)
+               for output in outputs)
+
+
 def write_csv(rows, output_path, force=False):
     """Write rows atomically as UTF-8 (with BOM) CSV. Refuses to overwrite unless force is True."""
     output = Path(output_path).resolve()
@@ -88,8 +118,12 @@ def export_feedback(db_path, output_path, force=False) -> int:
     """Export survey answers to CSV and return the number of data rows written."""
     db = Path(db_path).resolve()
     output = Path(output_path).resolve()
-    if _same_file(db, output):
+    # abspath applies Windows normalization (e.g. strips trailing dots/spaces) that resolve() keeps.
+    outputs = {output, Path(os.path.abspath(output_path))}
+    if any(_same_file(db, candidate) for candidate in outputs):
         raise ExportError("output path must differ from the database path")
+    if _is_db_sidecar(db_path, output_path):
+        raise ExportError("output path must not be a database journal file (-journal, -wal, -shm)")
     rows = read_answers(db)  # Validate the DB before creating any output directory.
     write_csv(rows, output, force)
     return len(rows)

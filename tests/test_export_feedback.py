@@ -269,6 +269,294 @@ class ExportFeedbackTests(unittest.TestCase):
         self.assert_error(code, out, err, "Error: output path must differ from the database path")
         self.assertEqual(sha256(self.db), before)
 
+    # PR #16 F1: DB sidecar files (-journal, -wal, -shm) are never valid outputs, even with --force.
+    SIDECAR_ERROR = "Error: output path must not be a database journal file"
+    SIDECAR_BYTES = b"\x00SIDECAR-ORIGINAL-BYTES\xff" * 8
+
+    def assert_sidecar_rejected(self, output, force, db_hash):
+        args = ["--db", str(self.db), "--output", str(output)] + (["--force"] if force else [])
+        code, stdout, stderr = self.run_main(*args)
+        self.assert_error(code, stdout, stderr, self.SIDECAR_ERROR)
+        self.assertNotIn(SECRET, stdout + stderr)
+        self.assertEqual(sha256(self.db), db_hash)
+        self.assertEqual(self.leftover_temp(self.tmp), [])
+
+    def test_existing_sidecar_rejected_with_and_without_force(self):
+        self.insert("telegram:1:1", 5, SECRET, "2026-01-01")
+        db_hash = sha256(self.db)
+        for suffix in ("-journal", "-wal", "-shm"):
+            for force in (False, True):
+                with self.subTest(suffix=suffix, force=force):
+                    sidecar = Path(str(self.db) + suffix)
+                    sidecar.write_bytes(self.SIDECAR_BYTES)
+                    try:
+                        self.assert_sidecar_rejected(sidecar, force, db_hash)
+                        self.assertEqual(sidecar.read_bytes(), self.SIDECAR_BYTES)
+                    finally:
+                        sidecar.unlink(missing_ok=True)
+
+    def test_absent_sidecar_rejected_and_not_created(self):
+        self.insert("telegram:1:1", 5, SECRET, "2026-01-01")
+        db_hash = sha256(self.db)
+        for suffix in ("-journal", "-wal", "-shm"):
+            for force in (False, True):
+                with self.subTest(suffix=suffix, force=force):
+                    sidecar = Path(str(self.db) + suffix)
+                    self.assertFalse(sidecar.exists())
+                    self.assert_sidecar_rejected(sidecar, force, db_hash)
+                    self.assertFalse(sidecar.exists())
+
+    def test_sidecar_rejected_before_db_is_opened(self):
+        for suffix in ("-journal", "-wal", "-shm"):
+            with self.subTest(suffix=suffix):
+                with patch.object(ef, "read_answers", side_effect=AssertionError("DB must not be read")) as mocked, \
+                        patch.object(ef, "write_csv", side_effect=AssertionError("must not write")) as writer:
+                    with self.assertRaises(ef.ExportError) as cm:
+                        ef.export_feedback(self.db, Path(str(self.db) + suffix), force=True)
+                mocked.assert_not_called()
+                writer.assert_not_called()
+                self.assertTrue(str(cm.exception).startswith("output path must not be a database journal file"))
+
+    def test_sidecar_alias_path_rejected(self):
+        db_hash = sha256(self.db)
+        for force in (False, True):
+            with self.subTest(force=force):
+                alias = self.tmp / "sub" / ".." / "test.db-wal"
+                self.assert_sidecar_rejected(alias, force, db_hash)
+                self.assertFalse((self.tmp / "sub").exists())
+                self.assertFalse((self.tmp / "test.db-wal").exists())
+
+    def test_sidecar_relative_paths_subprocess(self):
+        sidecar = self.tmp / "test.db-journal"
+        sidecar.write_bytes(self.SIDECAR_BYTES)
+        db_hash = sha256(self.db)
+        proc = subprocess.run([sys.executable, str(REPO_ROOT / "tools" / "export_feedback.py"), "--db", "test.db",
+                               "--output", "test.db-journal", "--force"],
+                              cwd=self.tmp, capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertEqual(proc.stdout, "")
+        self.assertTrue(proc.stderr.startswith(self.SIDECAR_ERROR), proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(sidecar.read_bytes(), self.SIDECAR_BYTES)
+        self.assertEqual(sha256(self.db), db_hash)
+
+    def test_sidecar_case_variant_on_windows(self):
+        db_hash = sha256(self.db)
+        variant = self.tmp / "TEST.DB-JOURNAL"
+        code, stdout, stderr = self.run_main("--db", str(self.db), "--output", str(variant), "--force")
+        if os.name == "nt":
+            # Case-insensitive filesystem: this is the same file as test.db-journal.
+            self.assert_error(code, stdout, stderr, self.SIDECAR_ERROR)
+            self.assertFalse(Path(str(self.db) + "-journal").exists())
+        else:
+            # Case-sensitive filesystem: a distinct, unrelated file is allowed.
+            self.assertEqual(code, 0, stderr)
+            self.assertTrue(variant.is_file())
+        self.assertEqual(sha256(self.db), db_hash)
+        self.assertEqual(self.leftover_temp(self.tmp), [])
+
+    def real_sidecars(self):
+        return [s for s in ("-journal", "-wal", "-shm") if Path(str(self.db) + s).exists()]
+
+    def enter_sandbox(self):
+        """Move self.tmp/self.db one level down so writes escaping self.tmp (e.g. a backslash name on POSIX)
+        land in a directory this test owns and can be detected without noise from the system temp dir."""
+        outer = self.tmp
+        self.tmp = outer / "sandbox"
+        self.tmp.mkdir()
+        self.db = self.tmp / "test.db"
+        ProcessedMessages(str(self.db))
+        self._outer_snapshot = (outer, sorted(p.name for p in outer.iterdir()))
+
+    def assert_nothing_escaped(self):
+        outer, before = self._outer_snapshot
+        self.assertEqual(sorted(p.name for p in outer.iterdir()), before, "file written outside self.tmp")
+
+    def test_trailing_dot_space_variants(self):
+        # Windows strips trailing dots/spaces, so these name the real sidecar / DB there; on POSIX they are distinct.
+        self.enter_sandbox()
+        self.insert("telegram:1:1", 5, SECRET, "2026-01-01")
+        db_hash = sha256(self.db)
+        cases = [("test.db-journal.", self.SIDECAR_ERROR), ("test.db-wal ", self.SIDECAR_ERROR),
+                 ("test.db-shm. .", self.SIDECAR_ERROR),
+                 ("test.db.", "Error: output path must differ from the database path")]
+        for name, message in cases:
+            for force in (False, True):
+                with self.subTest(name=name, force=force):
+                    out = str(self.tmp) + os.sep + name
+                    args = ["--db", str(self.db), "--output", out] + (["--force"] if force else [])
+                    code, stdout, stderr = self.run_main(*args)
+                    self.assertNotIn(SECRET, stdout + stderr)
+                    if os.name == "nt":
+                        self.assert_error(code, stdout, stderr, message)
+                    else:
+                        self.assertEqual(code, 0, stderr)
+                        self.assertEqual(self.read_csv(out)[1], ["5", SECRET, "2026-01-01"])
+                        os.remove(out)
+                    self.assertEqual(self.real_sidecars(), [])
+                    self.assertEqual(sha256(self.db), db_hash)
+                    self.assertEqual(self.leftover_temp(self.tmp), [])
+        self.assert_nothing_escaped()
+
+    def test_alternate_data_stream_forms(self):
+        self.enter_sandbox()
+        db_hash = sha256(self.db)
+        for name in ("test.db-journal::$DATA", "test.db-journal:s"):
+            with self.subTest(name=name):
+                out = str(self.tmp) + os.sep + name
+                code, stdout, stderr = self.run_main("--db", str(self.db), "--output", out, "--force")
+                if os.name == "nt":
+                    # The ADS suffix names the sidecar itself, so it must be rejected by the sidecar check.
+                    self.assert_error(code, stdout, stderr, self.SIDECAR_ERROR)
+                    self.assertEqual(self.leftover_temp(self.tmp), [])
+                self.assertFalse(Path(str(self.db) + "-journal").exists())
+                self.assertEqual(sha256(self.db), db_hash)
+        self.assert_nothing_escaped()
+
+    # Windows path aliases: extended-length prefix and 8.3 short names --------
+    SAME_DB_ERROR = "Error: output path must differ from the database path"
+
+    def short_path(self, path):
+        """8.3 short form of an existing path on Windows (may equal the long form if 8.3 names are disabled)."""
+        if os.name != "nt":
+            return str(path)
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, len(buf))
+        self.assertTrue(0 < length < len(buf), f"GetShortPathNameW failed for {path}")
+        return buf.value
+
+    def run_force(self, output):
+        """Run the CLI with --force. On POSIX these strings may be relative names, so run with cwd=tmp."""
+        if os.name == "nt":
+            return self.run_main("--db", str(self.db), "--output", output, "--force")
+        proc = subprocess.run([sys.executable, str(REPO_ROOT / "tools" / "export_feedback.py"), "--db", str(self.db),
+                               "--output", output, "--force"], cwd=self.tmp, capture_output=True, text=True, timeout=60)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    # Windows extended-length prefix. On POSIX it makes the path relative, so run_force uses cwd=self.tmp there.
+    EXTENDED = "\\\\?\\"
+
+    def test_extended_and_short_path_aliases_rejected(self):
+        self.enter_sandbox()
+        self.insert("telegram:1:1", 5, SECRET, "2026-01-01")
+        db_hash = sha256(self.db)
+        short_tmp, sep = self.short_path(self.tmp), os.sep
+        cases = [
+            ("extended sidecar", self.EXTENDED + str(self.tmp / "test.db-journal"), self.SIDECAR_ERROR),
+            ("short parent + trailing dot", short_tmp + sep + "test.db-wal.", self.SIDECAR_ERROR),
+            ("extended + short parent", self.EXTENDED + short_tmp + sep + "test.db-shm", self.SIDECAR_ERROR),
+            ("extended DB", self.EXTENDED + str(self.db), self.SAME_DB_ERROR),
+            ("short parent DB + trailing dot", short_tmp + sep + "test.db.", self.SAME_DB_ERROR),
+        ]
+        for label, output, message in cases:
+            with self.subTest(case=label):
+                code, stdout, stderr = self.run_force(output)
+                self.assertNotIn(SECRET, stdout + stderr)
+                if os.name == "nt":
+                    self.assert_error(code, stdout, stderr, message)
+                    self.assertEqual(self.leftover_temp(self.tmp), [])
+                self.assertEqual(self.real_sidecars(), [])
+                self.assertEqual(sha256(self.db), db_hash)
+        self.assert_nothing_escaped()
+
+    def test_normalized_component_then_parent_rejected(self):
+        # Security Low-A: "<sidecar>.\x\.." collapses to the sidecar on Windows; the raw last component is "..".
+        self.enter_sandbox()
+        self.insert("telegram:1:1", 5, SECRET, "2026-01-01")
+        db_hash = sha256(self.db)
+        short_tmp, sep = self.short_path(self.tmp), os.sep
+        tail = sep + "x" + sep + ".."
+        cases = [
+            ("short parent + trailing dot", short_tmp + sep + "test.db-journal." + tail),
+            ("short parent + trailing space", short_tmp + sep + "test.db-wal " + tail),
+            ("extended prefix", self.EXTENDED + str(self.tmp) + sep + "test.db-wal" + tail),
+        ]
+        for label, output in cases:
+            with self.subTest(case=label):
+                code, stdout, stderr = self.run_force(output)
+                self.assertNotIn(SECRET, stdout + stderr)
+                if os.name == "nt":
+                    self.assert_error(code, stdout, stderr, self.SIDECAR_ERROR)
+                    self.assertEqual(self.leftover_temp(self.tmp), [])
+                # On POSIX these are ordinary nested names; any file they create stays inside self.tmp.
+                self.assertEqual(self.real_sidecars(), [])
+                self.assertEqual(sha256(self.db), db_hash)
+        # The same shape under another directory is not the DB's sidecar.
+        other = self.tmp / "otherdir"
+        other.mkdir()
+        code, stdout, stderr = self.run_force(str(other) + sep + "test.db-journal." + tail)
+        self.assertNotIn(SECRET, stdout + stderr)
+        if os.name == "nt":
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(self.read_csv(other / "test.db-journal")[1], ["5", SECRET, "2026-01-01"])
+        self.assertEqual(self.real_sidecars(), [])
+        self.assertEqual(sha256(self.db), db_hash)
+        self.assert_nothing_escaped()
+
+    def test_existing_sidecar_short_name_rejected(self):
+        self.enter_sandbox()
+        self.insert("telegram:1:1", 5, SECRET, "2026-01-01")
+        db_hash = sha256(self.db)
+        for suffix in ("-journal", "-wal", "-shm"):
+            with self.subTest(suffix=suffix):
+                sidecar = Path(str(self.db) + suffix)
+                sidecar.write_bytes(self.SIDECAR_BYTES)
+                try:
+                    short = self.short_path(sidecar)
+                    code, stdout, stderr = self.run_force(short)
+                    # If 8.3 names are disabled, short == long and this is the plain existing-sidecar case.
+                    self.assert_error(code, stdout, stderr, self.SIDECAR_ERROR)
+                    self.assertNotIn(SECRET, stdout + stderr)
+                    self.assertEqual(sidecar.read_bytes(), self.SIDECAR_BYTES)
+                    self.assertEqual(sha256(self.db), db_hash)
+                    self.assertEqual(self.leftover_temp(self.tmp), [])
+                finally:
+                    sidecar.unlink(missing_ok=True)
+        self.assert_nothing_escaped()
+
+    def test_sidecar_name_in_other_directory_allowed(self):
+        self.enter_sandbox()
+        self.insert("telegram:1:1", 5, "ok", "2026-01-01")
+        db_hash = sha256(self.db)
+        existing_dir = self.tmp / "otherdir"
+        existing_dir.mkdir()
+        for out in (existing_dir / "test.db-journal", self.tmp / "newdir" / "test.db-journal"):
+            with self.subTest(output=str(out)):
+                code, _, stderr = self.run_main("--db", str(self.db), "--output", str(out), "--force")
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(self.read_csv(out)[1], ["5", "ok", "2026-01-01"])
+                self.assertEqual(self.real_sidecars(), [])
+                self.assertEqual(sha256(self.db), db_hash)
+        # Going back up through an existing directory still names the DB's own sidecar.
+        alias = existing_dir / ".." / "test.db-wal"
+        code, stdout, stderr = self.run_main("--db", str(self.db), "--output", str(alias), "--force")
+        self.assert_error(code, stdout, stderr, self.SIDECAR_ERROR)
+        self.assertEqual(self.real_sidecars(), [])
+        self.assertEqual(sha256(self.db), db_hash)
+        self.assert_nothing_escaped()
+
+    def test_sidecar_near_miss_names_allowed(self):
+        self.insert("telegram:1:1", 5, "ok", "2026-01-01")
+        db_hash = sha256(self.db)
+        other = self.tmp / "other.db"
+        ProcessedMessages(str(other))
+        names = ["test.db-journal.csv", "test.db.wal", "test.db-journal2", "feedback-journal.csv", "other.db-wal"]
+        for name in names:
+            with self.subTest(name=name):
+                out = self.tmp / name
+                code, stdout, stderr = self.run_main("--db", str(self.db), "--output", str(out))
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(stderr, "")
+                self.assertEqual(self.read_csv(out), [["rating", "comment", "updated_at"], ["5", "ok", "2026-01-01"]])
+                self.assertEqual(sha256(self.db), db_hash)
+        # Overwriting another DB's sidecar name with --force is also allowed.
+        existing = self.tmp / "other.db-shm"
+        existing.write_bytes(b"x")
+        code, _, stderr = self.run_main("--db", str(self.db), "--output", str(existing), "--force")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.read_csv(existing)[1], ["5", "ok", "2026-01-01"])
+
     def test_parent_is_regular_file(self):
         blocker = self.tmp / "blocker"
         blocker.write_bytes(b"file")
