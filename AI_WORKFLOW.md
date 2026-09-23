@@ -23,6 +23,7 @@
 → Claude Code：research → implementation → test → security → review → release
 → PR
 → 人間の最終確認
+→ /merge-check（読み取り専用の最終判定）
 → merge
 ```
 
@@ -31,8 +32,8 @@
 3. **着手準備**：CLAUDE.md、担当定義、README、作業ツリー、現在のブランチを確認する。既存の未コミット変更を保護し、実装前に作業ブランチを用意する。既に案件用ブランチがあれば確認して利用する。
 4. **6段階の開発**：下表の順に進める。親エージェントが要件、変更範囲・差分、前工程の結果、未解決事項を次の担当へ渡す。
 5. **PR準備・作成**：releaseがPR本文案とコミット候補を用意する。明示的な指示がある場合のみ、その範囲でcommit・push・PR作成を行う。PRにはIssue、最終差分に対応した検証結果、残る制約を記載する。
-6. **人間の最終確認**：差分、受入条件、検証結果、Security / Review、残課題、必要な移行・復旧手順を確認する。修正要求は該当工程に戻す。
-7. **merge**：人間の確認と明示的なマージ指示を受けて行う。必要なCIが設定されている場合は成功を確認する。main同期・ブランチ削除・デプロイはそれぞれ指示された範囲で行う。マージと本番公開は区別する。
+6. **人間の最終確認**：差分、受入条件、検証結果、Security / Review、残課題、必要な移行・復旧手順を確認する。修正要求は該当工程に戻す（既存PRの修正は `/fix <PR番号>`）。確認結果は、`/merge-check` のSkillに定める固定形式（`HUMAN-FINAL-CONFIRMATION`、確認者、最新headのフルSHA（40桁）、`approve-merge: yes`）のPRコメントとして人間が記録する（PR本文はエージェントが更新するため、本文のチェック欄は判定に使わない）。
+7. **merge**：merge直前に `/merge-check <PR番号>` で最終状態を確認し、`READY` の場合に人間がGitHub上で行う（エージェントに行わせる場合は、人間の確認と明示的なマージ指示の範囲に限る）。必要なCIが設定されている場合は成功を確認する。main同期・ブランチ削除・デプロイはそれぞれ指示された範囲で行う。マージと本番公開は区別する。
 
 | 工程 | 次工程へ渡す内容 |
 | --- | --- |
@@ -54,6 +55,30 @@
 既存コード・テンプレートを確認し、重大な曖昧さと重複がなければ `gh issue create` で1件登録する。重大な不明点、資料取得失敗、権限エラーでは登録せず確認点を報告する。送信結果が不明な場合も再送せず、GitHub上の状態を確認する。
 
 Issue番号・URL・タイトル・要約を報告して終了する。Task作成・開発・commit・push・PR作成は行わない。内容を確認して開発を開始する場合は、ユーザーが別途 `/start <Issue番号>` を実行する。「下書きだけ」の依頼では登録しない。
+
+## `/merge-check`：merge直前の最終判定
+
+[`.claude/skills/merge-check/SKILL.md`](.claude/skills/merge-check/SKILL.md) を手動で呼び出す。
+
+```text
+/merge-check <PR番号>
+```
+
+PRを読み取り専用で確認し、`READY` / `BLOCKED` を報告する。次を最新head SHAに対して照合する。
+
+- PRがOPENでdraftでないこと、baseが`main`であること、conflictがないこと
+- fork由来でなく、判定基準ファイル（CLAUDE.md、AI_WORKFLOW.md、`.mcp.json`、`.claude/`（案件Taskを除く）、`.github/`）を変更していないこと（該当するPRはREADYにせず、人間が判断する）
+- 最新headに対するCI / status checksの成功
+- linked Issue、PR本文のTests / Security / Review / Remaining concerns / Release
+- 検証記録の対象コミットが最新headと一致すること
+- Critical / High / Mediumの未解決がないこと（完了条件より厳しいmerge前の基準。Mediumを残してmergeする場合は人間が判断する）、必須の修正要求が未対応でないこと
+- 書き込み権限を持つ投稿者による、最新headのフルSHAを含む固定形式の最終確認コメントがあること（同じGitHubアカウントを使うため、記録者が本人かは人間が確認する）
+
+ローカルで読み込む判定基準ファイルがmainと同じ内容である状態で実行する（Skillがblob SHAで確認する）。
+いずれかを満たさない、または確認できない場合は `BLOCKED` とする。Low / Infoだけの場合は一覧化して人間の判断に回す。
+次の行動として、修正が必要、またはUpdate branchなどで検証記録が古くなった場合は `/fix <PR番号>`、人間の最終確認だけが未実施なら確認を記録して再実行、`READY` なら人間がGitHub上でmergeすると示す。
+
+merge、commit、push、コード・PR本文の変更、コメント投稿、review threadのresolve、Issueのclose、CIの再実行、deploy / releaseは行わない。`READY` はmergeの許可ではない。エージェント（`/fix` による本文更新を含む）は、人間の最終確認コメントを投稿・編集したり、本文の最終確認欄にチェック・確認者を記入したりしてはならない。headが更新されたら、既存の確認は無効になる。
 
 ## GitHub Actionsの自動テスト
 
