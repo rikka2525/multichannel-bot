@@ -30,6 +30,7 @@ GitHub Issue #$issue を開発対象として処理する。
 - Issueの手動close
 - 他の作業ブランチの削除
 - ユーザーの既存未コミット変更のstash・破棄・上書き
+- `HUMAN-FINAL-CONFIRMATION` を含むコメントの投稿・編集、PR本文の人間の最終確認欄へのチェック・確認者の記入
 
 ## 0. Preflight
 

@@ -67,14 +67,16 @@ Issue番号・URL・タイトル・要約を報告して終了する。Task作�
 PRを読み取り専用で確認し、`READY` / `BLOCKED` を報告する。次を最新head SHAに対して照合する。
 
 - PRがOPENでdraftでないこと、baseが`main`であること、conflictがないこと
+- fork由来でなく、判定基準ファイル（CLAUDE.md、AI_WORKFLOW.md、`.mcp.json`、`.claude/`（案件Taskを除く）、`.github/`）を変更していないこと（該当するPRはREADYにせず、人間が判断する）
 - 最新headに対するCI / status checksの成功
 - linked Issue、PR本文のTests / Security / Review / Remaining concerns / Release
 - 検証記録の対象コミットが最新headと一致すること
-- Critical / High / Mediumの未解決がないこと、必須の修正要求が未対応でないこと
+- Critical / High / Mediumの未解決がないこと（完了条件より厳しいmerge前の基準。Mediumを残してmergeする場合は人間が判断する）、必須の修正要求が未対応でないこと
 - 書き込み権限を持つ投稿者による、最新headのフルSHAを含む固定形式の最終確認コメントがあること（同じGitHubアカウントを使うため、記録者が本人かは人間が確認する）
 
+ローカルで読み込む判定基準ファイルがmainと同じ内容である状態で実行する（Skillがblob SHAで確認する）。
 いずれかを満たさない、または確認できない場合は `BLOCKED` とする。Low / Infoだけの場合は一覧化して人間の判断に回す。
-次の行動として、修正が必要なら `/fix <PR番号>`、人間の最終確認だけが未実施なら確認を記録して再実行、`READY` なら人間がGitHub上でmergeすると示す。
+次の行動として、修正が必要、またはUpdate branchなどで検証記録が古くなった場合は `/fix <PR番号>`、人間の最終確認だけが未実施なら確認を記録して再実行、`READY` なら人間がGitHub上でmergeすると示す。
 
 merge、commit、push、コード・PR本文の変更、コメント投稿、review threadのresolve、Issueのclose、CIの再実行、deploy / releaseは行わない。`READY` はmergeの許可ではない。エージェント（`/fix` による本文更新を含む）は、人間の最終確認コメントを投稿・編集したり、本文の最終確認欄にチェック・確認者を記入したりしてはならない。headが更新されたら、既存の確認は無効になる。
 
